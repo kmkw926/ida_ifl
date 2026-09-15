@@ -192,6 +192,49 @@ def _is_hex_str(s):
     return all(c in string.hexdigits for c in s)
 
 
+def _parse_addr_chunk(s: str) -> Tuple[Optional[int], bool]:
+    """Parses an address chunk coming from an imported tag/csv line.
+
+    Accepted formats:
+      "1a20"              - an offset, RVA or VA: the loadBase decides
+      "0x1a20"            - the same, with the "0x" prefix
+      "2d491c11000+279"   - base + offset, i.e. an already resolved VA
+                            (as reported when tracking shellcode, where the
+                            loader base of the shellcode page is not the base
+                            of the analyzed module and may differ per line)
+
+    Returns:
+      tuple: (addr, is_absolute)
+        addr        : int, or None when the chunk cannot be parsed
+        is_absolute : True when the parsed value is already a VA and must NOT
+                      be shifted by the load base
+    """
+
+    if s is None:
+        return None, False
+    chunk = s.strip()
+    if "+" in chunk:
+        base_chunk, _, offset_chunk = chunk.partition("+")
+        base_chunk = base_chunk.strip()
+        offset_chunk = offset_chunk.strip()
+        # both sides must be non-empty hex numbers
+        if not base_chunk or not offset_chunk:
+            return None, False
+        if not _is_hex_str(base_chunk) or not _is_hex_str(offset_chunk):
+            return None, False
+        try:
+            return int(base_chunk, 16) + int(offset_chunk, 16), True
+        except ValueError:
+            # not a valid hex number, so this chunk cannot be used
+            return None, False
+    if not chunk or not _is_hex_str(chunk):
+        return None, False
+    try:
+        return int(chunk, 16), False
+    except ValueError:
+        return None, False
+
+
 # Functions and args
 
 
@@ -1117,17 +1160,16 @@ class FunctionsListForm_t(PluginForm):
                     fn = line.split(delim2)  # try old delimiter
                 if len(fn) < 2:
                     continue
-                start = 0
                 addr_chunk = fn[rva_indx].strip()
-                if not _is_hex_str(addr_chunk):
-                    continue
-                try:
-                    start = int(addr_chunk, 16)
-                except ValueError:
-                    # this line doesn't start from an offset, so skip it
+                # accepts "1a20", "0x1a20" and the shellcode form
+                # "<page_base>+<offset>", that is an already resolved VA
+                start, is_absolute = _parse_addr_chunk(addr_chunk)
+                if start is None:
+                    # this line doesn't start from a parsable offset, so skip it
                     continue
                 func_name = fn[cmt_indx].strip()
-                if start < loadBase:  # it is RVA
+                # a "base+offset" chunk is already a VA: never rebase it
+                if not is_absolute and start < loadBase:  # it is RVA
                     start = start + loadBase  # convert to VA
 
                 if is_imp_list or (start in curr_functions):
